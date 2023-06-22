@@ -31,11 +31,7 @@ class StatusWidgetProvider: TimelineProvider {
         expireAfter: localCacheDuration)
 
     lazy var glucoseStore = GlucoseStore(
-        healthStore: healthStore,
-        observeHealthKitSamplesFromOtherApps: FeatureFlags.observeHealthKitGlucoseSamplesFromOtherApps,
-        storeSamplesToHealthKit: false,
         cacheStore: cacheStore,
-        observationEnabled: false,
         provenanceIdentifier: HKSource.default().bundleIdentifier
     )
 
@@ -112,41 +108,45 @@ class StatusWidgetProvider: TimelineProvider {
             }
             group.leave()
         }
-        group.notify(queue: .main) {
+        group.wait()
+
+        let finalGlucose = glucose
+
+        Task { @MainActor in
             guard let defaults = self.defaults,
                   let context = defaults.statusExtensionContext,
                   let contextUpdatedAt = context.createdAt,
-                  let unit = self.glucoseStore.preferredUnit
+                  let unit = await healthStore.cachedPreferredUnits(for: .bloodGlucose)
             else {
                 return
             }
-            
+
             let lastCompleted = context.lastLoopCompleted
-            
+
             let closeLoop = context.isClosedLoop ?? false
-            
+
             let netBasal = context.netBasal
-            
-            let currentGlucose = glucose.last
+
+            let currentGlucose = finalGlucose.last
             var previousGlucose: GlucoseValue?
 
-            if glucose.count > 1 {
-                previousGlucose = glucose[glucose.count - 2]
+            if finalGlucose.count > 1 {
+                previousGlucose = finalGlucose[finalGlucose.count - 2]
             }
 
             var delta: HKQuantity?
 
-            // Making sure that previous glucose is within 5 mins of last glucose to avoid large deltas on sensor changes, missed readings, etc.
+            // Making sure that previous glucose is within 6 mins of last glucose to avoid large deltas on sensor changes, missed readings, etc.
             if let prevGlucose = previousGlucose,
                let currGlucose = currentGlucose,
-               abs((prevGlucose.startDate.addingTimeInterval(.minutes(5)) - currGlucose.startDate).minutes) > 1
+               currGlucose.startDate.timeIntervalSince(prevGlucose.startDate).minutes < 6
             {
                 let deltaMGDL = currGlucose.quantity.doubleValue(for: .milligramsPerDeciliter) - prevGlucose.quantity.doubleValue(for: .milligramsPerDeciliter)
                 delta = HKQuantity(unit: .milligramsPerDeciliter, doubleValue: deltaMGDL)
             }
 
             let predictedGlucose = context.predictedGlucose?.samples
-            
+
             let eventualGlucose = predictedGlucose?.last
 
             let updateDate = Date()
